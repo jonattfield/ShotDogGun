@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ShotDogGun</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #000; }
+    canvas { display: block; }
+
+    #ui {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      font-family: 'Fredoka One', cursive;
+      color: #fff;
+    }
+
+    #score {
+      position: absolute;
+      top: 20px; left: 24px;
+      font-size: 28px;
+    }
+
+    #lives {
+      position: absolute;
+      top: 20px; right: 24px;
+      font-size: 28px;
+    }
+
+    #message {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 96px;
+      text-align: center;
+      display: none;
+      text-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      white-space: nowrap;
+    }
+
+    #gameover {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      display: none;
+    }
+
+    #gameover h1 {
+      font-size: 120px;
+      line-height: 1;
+      margin-bottom: 32px;
+    }
+
+    #playagain {
+      pointer-events: all;
+      cursor: pointer;
+      font-family: 'Fredoka One', cursive;
+      font-size: 28px;
+      background: #E8B840;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 16px 56px;
+      letter-spacing: 2px;
+    }
+
+    #playagain:hover {
+      background: #d4a530;
+    }
+  </style>
+</head>
+<body>
+<div id="ui">
+  <div id="score">Score: 0</div>
+  <div id="lives">Lives: 3</div>
+  <div id="message"></div>
+  <div id="gameover">
+    <h1>GAME OVER</h1>
+    <button id="playagain">PLAY AGAIN</button>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const BULLET_FORCE    = 28;
+const BURGER_INTERVAL = 2.5;
+const FLOOR_Y         = 0;
+const GRAVITY         = -18;   // sausage projectile gravity
+
+// Burger tuning — adjust these to change feel
+const BURGER_GRAVITY  = -4;    // gentler than projectile gravity → longer hang time
+const BURGER_VY_MIN   = 12;     // upward launch velocity range
+const BURGER_VY_MAX   = 10;
+const BURGER_VZ_MIN   = -4;    // forward velocity range (negative = into scene)
+const BURGER_VZ_MAX   = -7;
+const BURGER_LATERAL  = 4;     // max side drift toward centre
+
+// ─── Scene ────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x5BBFBF);
+scene.fog = new THREE.Fog(0x5BBFBF, 40, 80);
+
+// Camera — behind and slightly above cannon, looking forward over it
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 3.5, 12);
+camera.lookAt(0, 4.6, 0);
+
+// Lights
+const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambient);
+
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(5, 12, 8);
+sun.castShadow = true;
+scene.add(sun);
+
+// Floor
+const floorGeo = new THREE.PlaneGeometry(120, 60);
+const floorMat = new THREE.MeshToonMaterial({ color: 0xA0D4E8 });
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = FLOOR_Y;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// ─── Toon materials ───────────────────────────────────────────────────────────
+function toon(color) {
+  return new THREE.MeshToonMaterial({ color });
+}
+
+const matSausage  = toon(0xE07070);
+const matBun      = toon(0xC8A060);
+const matBunTop   = toon(0xC89050);
+const matPatty    = toon(0xB83030);
+const matLettuce  = toon(0x88C840);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function makeCapsule(radiusTop, radiusBot, height, radSeg, capSeg, mat) {
+  const geo = new THREE.CapsuleGeometry(radiusTop, height, capSeg ?? 8, radSeg ?? 12);
+  return new THREE.Mesh(geo, mat);
+}
+
+function makeCylinder(rt, rb, h, seg, mat) {
+  const geo = new THREE.CylinderGeometry(rt, rb, h, seg ?? 24);
+  return new THREE.Mesh(geo, mat);
+}
+
+function makeBox(w, h, d, mat) {
+  return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+}
+
+// ─── Cannon ───────────────────────────────────────────────────────────────────
+const cannon = new THREE.Group();
+scene.add(cannon);
+cannon.position.set(0, FLOOR_Y + 2.2, 8.5);
+
+// Bun base (box)
+const bunBase = makeBox(2.4, 0.55, 1.4, matBun);
+bunBase.position.set(0, 0, 0);
+cannon.add(bunBase);
+
+// Two sausage barrels
+function makeSausageMesh() {
+  const s = makeCapsule(0.28, 0.28, 1.4, 12, 8, matSausage.clone());
+  s.rotation.x = -Math.PI / 2; // align along cannon's -Z (forward/lookAt axis)
+  return s;
+}
+
+const barrel1 = makeSausageMesh();
+barrel1.position.set(-0.42, 0.42, 0);
+cannon.add(barrel1);
+
+const barrel2 = makeSausageMesh();
+barrel2.position.set(0.42, 0.42, 0);
+cannon.add(barrel2);
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+let score    = 0;
+let lives    = 3;
+let shotsFired = 0;   // 0, 1, or 2
+let perfect  = 0;
+let gameOver = false;
+let messageTimer = 0;
+
+const projectiles = []; // { mesh, velocity, age }
+const burgers     = []; // { group, velocity, isDead, parts[] }
+const debris      = []; // { mesh, velocity, angVel, age }
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+const uiScore   = document.getElementById('score');
+const uiLives   = document.getElementById('lives');
+const uiMsg     = document.getElementById('message');
+const uiGameOver= document.getElementById('gameover');
+
+function setScore(n) { score = n; uiScore.textContent = 'Score: ' + n; }
+function setLives(n) { lives = n; uiLives.textContent = 'Lives: ' + n; }
+
+function showMessage(text, duration) {
+  uiMsg.textContent = text;
+  uiMsg.style.display = 'block';
+  messageTimer = duration;
+}
+
+function hideMessage() {
+  uiMsg.style.display = 'none';
+  messageTimer = 0;
+}
+
+// ─── Burger factory ───────────────────────────────────────────────────────────
+function makeBurger() {
+  const group = new THREE.Group();
+
+  const topBun = makeCylinder(0.52, 0.46, 0.30, 24, matBunTop.clone());
+  topBun.position.y = 0.38;
+  // Dome the top bun slightly
+  topBun.scale.y = 1.3;
+
+  const patty = makeCylinder(0.50, 0.50, 0.14, 24, matPatty.clone());
+  patty.position.y = 0.14;
+
+  const lettuce = makeCylinder(0.58, 0.54, 0.07, 24, matLettuce.clone());
+  lettuce.position.y = 0.22;
+
+  const botBun = makeCylinder(0.50, 0.44, 0.20, 24, matBun.clone());
+  botBun.position.y = -0.05;
+
+  group.add(topBun, patty, lettuce, botBun);
+
+  return { group, topBun, patty, lettuce, botBun };
+}
+
+// ─── Launchers ────────────────────────────────────────────────────────────────
+// Two launchers off to the upper-right and upper-left, angled down toward player
+// Launchers sit to the left and right behind the camera, at ground level.
+// Burgers are fired upward and forward like clay pigeons.
+const launcherDefs = [
+  { pos: new THREE.Vector3(-10, FLOOR_Y + 1, 18), side: 1  },  // left, fires rightward
+  { pos: new THREE.Vector3( 10, FLOOR_Y + 1, 18), side: -1 },  // right, fires leftward
+];
+
+let launcherTimers = [
+  THREE.MathUtils.randFloat(BURGER_INTERVAL, BURGER_INTERVAL * 1.5),
+  THREE.MathUtils.randFloat(BURGER_INTERVAL * 1.2, BURGER_INTERVAL * 2),
+];
+
+function launchBurger(launcherIdx) {
+  const def = launcherDefs[launcherIdx];
+  const { group, topBun, patty, lettuce, botBun } = makeBurger();
+
+  group.position.copy(def.pos);
+
+  // Clay pigeon arc: upward + forward + slight drift toward centre
+  const vel = new THREE.Vector3(
+    def.side * THREE.MathUtils.randFloat(1, BURGER_LATERAL),
+    THREE.MathUtils.randFloat(BURGER_VY_MIN, BURGER_VY_MAX),
+    THREE.MathUtils.randFloat(BURGER_VZ_MAX, BURGER_VZ_MIN)
+  );
+
+  scene.add(group);
+
+  burgers.push({
+    group,
+    parts: [topBun, patty, lettuce, botBun],
+    velocity: vel,
+    isDead: false,
+    age: 0,
+  });
+}
+
+// Reset launcher timer after firing
+function resetLauncherTimer(idx) {
+  launcherTimers[idx] = THREE.MathUtils.randFloat(BURGER_INTERVAL, BURGER_INTERVAL * 3);
+}
+
+// ─── Firing ───────────────────────────────────────────────────────────────────
+function makeProjectileSausage() {
+  const s = makeCapsule(0.22, 0.22, 1.0, 12, 8, matSausage.clone());
+  return s;
+}
+
+const mouse = new THREE.Vector2();
+const raycaster = new THREE.Raycaster();
+
+window.addEventListener('mousemove', e => {
+  mouse.x =  (e.clientX / innerWidth)  * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+const _aimTarget = new THREE.Vector3();
+
+function updateCannonAim() {
+  raycaster.setFromCamera(mouse, camera);
+  raycaster.ray.at(18, _aimTarget);
+  cannon.lookAt(_aimTarget);
+}
+
+function getAimDirection() {
+  const dir = new THREE.Vector3();
+  cannon.getWorldDirection(dir);
+  return dir;
+}
+
+function fireSausage(barrelMesh) {
+  const dir = getAimDirection();
+
+  const mesh = makeProjectileSausage();
+  // Position at barrel world position
+  const worldPos = new THREE.Vector3();
+  barrelMesh.getWorldPosition(worldPos);
+  mesh.position.copy(worldPos);
+
+  // Orient capsule toward aim direction
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+
+  scene.add(mesh);
+
+  projectiles.push({
+    mesh,
+    velocity: dir.clone().multiplyScalar(BULLET_FORCE),
+    age: 0,
+  });
+}
+
+window.addEventListener('click', () => {
+  if (gameOver) return;
+
+  if (shotsFired < 2) {
+    const barrel = shotsFired === 0 ? barrel1 : barrel2;
+    barrel.visible = false;
+    fireSausage(barrel);
+    shotsFired++;
+
+    if (shotsFired === 2) {
+      showMessage('RELOAD!!!', Infinity);
+    }
+  } else {
+    // Reload
+    barrel1.visible = true;
+    barrel2.visible = true;
+    shotsFired = 0;
+    hideMessage();
+    perfect = 0; // reload resets perfect streak
+  }
+});
+
+// ─── Collision (sphere vs sphere) ────────────────────────────────────────────
+function sphereHit(a, b, radiusSum) {
+  return a.distanceToSquared(b) < radiusSum * radiusSum;
+}
+
+// ─── Burger explode ───────────────────────────────────────────────────────────
+function explodeBurger(burger) {
+  burger.isDead = true;
+  const origin = burger.group.position.clone();
+
+  burger.parts.forEach((part, i) => {
+    const worldPos = new THREE.Vector3();
+    part.getWorldPosition(worldPos);
+
+    // Detach from group
+    scene.attach(part);
+
+    const vel = new THREE.Vector3(
+      THREE.MathUtils.randFloatSpread(5),
+      THREE.MathUtils.randFloat(2, 6),
+      THREE.MathUtils.randFloatSpread(3)
+    );
+    const angVel = new THREE.Vector3(
+      THREE.MathUtils.randFloatSpread(4),
+      THREE.MathUtils.randFloatSpread(4),
+      THREE.MathUtils.randFloatSpread(4)
+    );
+
+    debris.push({ mesh: part, velocity: vel, angVel, age: 0 });
+  });
+
+  scene.remove(burger.group);
+}
+
+// ─── Scoring ──────────────────────────────────────────────────────────────────
+function onBurgerHit() {
+  setScore(score + 1);
+  perfect++;
+  if (perfect >= 2) {
+    setLives(lives + 1);
+    showMessage('PERFECT', 1.5);
+    perfect = 0;
+  }
+}
+
+function onBurgerFloor() {
+  perfect = 0;
+  setLives(lives - 1);
+  if (lives <= 0) {
+    triggerGameOver();
+  }
+}
+
+function triggerGameOver() {
+  gameOver = true;
+  uiGameOver.style.display = 'block';
+  hideMessage();
+}
+
+document.getElementById('playagain').addEventListener('click', () => {
+  location.reload();
+});
+
+
+// ─── Main loop ────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (!gameOver) {
+    updateCannonAim();
+
+    // Message timer
+    if (messageTimer > 0 && messageTimer !== Infinity) {
+      messageTimer -= dt;
+      if (messageTimer <= 0) hideMessage();
+    }
+
+    // Launcher timers
+    launcherTimers.forEach((t, i) => {
+      launcherTimers[i] -= dt;
+      if (launcherTimers[i] <= 0) {
+        launchBurger(i);
+        resetLauncherTimer(i);
+      }
+    });
+
+    // Update projectiles
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.age += dt;
+      p.velocity.y += GRAVITY * dt;
+      p.mesh.position.addScaledVector(p.velocity, dt);
+
+      // Orient to velocity
+      const speed = p.velocity.length();
+      if (speed > 0.5) {
+        const dir = p.velocity.clone().normalize();
+        p.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+      }
+
+      // Check collision with burgers
+      let hit = false;
+      for (const burger of burgers) {
+        if (burger.isDead) continue;
+        if (sphereHit(p.mesh.position, burger.group.position, 1.1)) {
+          explodeBurger(burger);
+          onBurgerHit();
+          hit = true;
+          break;
+        }
+      }
+
+      // Floor bounce
+      if (p.mesh.position.y <= FLOOR_Y + 0.22) {
+        p.mesh.position.y = FLOOR_Y + 0.22;
+        p.velocity.y = Math.abs(p.velocity.y) * 0.4;
+        p.velocity.x *= 0.8;
+        p.velocity.z *= 0.8;
+      }
+
+      if (hit || p.age > 4) {
+        scene.remove(p.mesh);
+        projectiles.splice(i, 1);
+      }
+    }
+
+    // Update burgers
+    for (let i = burgers.length - 1; i >= 0; i--) {
+      const b = burgers[i];
+      b.age += dt;
+
+      if (!b.isDead) {
+        b.velocity.y += BURGER_GRAVITY * dt;
+        b.group.position.addScaledVector(b.velocity, dt);
+        b.group.rotation.x += 1.2 * dt;
+        b.group.rotation.z += 0.8 * dt;
+
+        // Floor collision — deduct life, explode into debris
+        if (b.group.position.y <= FLOOR_Y + 0.3) {
+          onBurgerFloor();
+          explodeBurger(b);
+          burgers.splice(i, 1);
+          continue;
+        }
+
+        // Auto-destroy after 8s
+        if (b.age > 8) {
+          scene.remove(b.group);
+          burgers.splice(i, 1);
+          continue;
+        }
+      } else {
+        burgers.splice(i, 1);
+      }
+    }
+
+    // Update debris
+    for (let i = debris.length - 1; i >= 0; i--) {
+      const d = debris[i];
+      d.age += dt;
+      d.velocity.y += GRAVITY * dt;
+      d.mesh.position.addScaledVector(d.velocity, dt);
+      d.mesh.rotation.x += d.angVel.x * dt;
+      d.mesh.rotation.y += d.angVel.y * dt;
+      d.mesh.rotation.z += d.angVel.z * dt;
+
+      // Floor bounce
+      if (d.mesh.position.y <= FLOOR_Y + 0.1) {
+        d.mesh.position.y = FLOOR_Y + 0.1;
+        d.velocity.y = Math.abs(d.velocity.y) * 0.35;
+        d.velocity.x *= 0.75;
+        d.velocity.z *= 0.75;
+        d.angVel.multiplyScalar(0.6);
+        if (Math.abs(d.velocity.y) < 0.3) d.velocity.y = 0;
+      }
+
+      if (d.age > 4 || (d.age > 1 && d.velocity.lengthSq() < 0.01)) {
+        scene.remove(d.mesh);
+        debris.splice(i, 1);
+      }
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+tick();
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

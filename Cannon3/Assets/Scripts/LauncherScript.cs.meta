@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: c0270c645053945639828e43ff862eda
+timeCreated: 1514227330
+licenseType: Free
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - BurgerPrefab: {fileID: 1890904785391048, guid: eea84666483874c62b7e36fddcfe7da5,
+      type: 2}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
